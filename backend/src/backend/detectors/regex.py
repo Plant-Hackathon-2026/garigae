@@ -2,14 +2,14 @@
 
 줄마다 이렇게 처리한다.
 
-1. 항목별 정규식을 돌리고 검증(날짜, Luhn)을 통과한 것만 후보로 남긴다
+1. 항목별 정규식을 돌리고 검증(날짜, Luhn, 키워드)을 통과한 것만 후보로 남긴다
 2. 같은 구간을 여러 항목이 잡으면 우선순위(`_RULES` 순서)가 앞선 하나만 남긴다
 
 감지 기준은 `plans/backend-plan.md`의 "감지 규칙 > 정규식 감지기" 표를 따른다.
 """
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 
@@ -23,6 +23,8 @@ SCORE_VALIDATED = 0.9
 SCORE_EMAIL = 0.9
 # 일부가 가려져 Luhn을 볼 수 없음
 SCORE_MASKED_CARD = 0.75
+# 검증 수단이 없고 키워드 조건으로만 잡음
+SCORE_ACCOUNT = 0.7
 
 _DIGITS = frozenset("0123456789")
 
@@ -78,6 +80,16 @@ _EMAIL = _compile(
     r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])"
 )
 
+# 계좌번호: 하이픈으로 나뉜 그룹이 2개 이상인 숫자열 전체. 숫자 개수(10~14)는 검증에서 본다
+_ACCOUNT = _compile(rf"{_START}\d+(?:\s?-\s?\d+)+{_END}")
+# 은행명은 "OO은행"·"OO뱅크"·"OO금고"로 대부분 잡힌다. 줄여 쓰는 이름 중
+# 우리·하나·기업·부산·대구·광주·경남·전북·제주처럼 일반 단어나 지역명과 겹치는 것은 넣지 않았다
+_ACCOUNT_KEYWORD = _compile(
+    r"계좌|입금|예금주"
+    r"|은행|뱅크|금고|신협|수협|농협|축협|우체국|국민|신한|카뱅|케뱅|씨티"
+    r"|(?<![A-Za-z])(?:KB|NH|IBK|KDB|SC)(?![A-Za-z])"
+)
+
 
 # --- 검증 ---------------------------------------------------------------------
 
@@ -85,6 +97,11 @@ _EMAIL = _compile(
 @dataclass(frozen=True)
 class _Context:
     line: TextLine
+    # 줄 id → 원본 텍스트. 줄 id는 위→아래 순서라 `id - 1`이 바로 윗줄이다
+    texts: Mapping[int, str]
+
+    def text_at(self, offset: int) -> str:
+        return self.texts.get(self.line.id + offset, "")
 
 
 _Verdict = tuple[PiiType, float] | None
@@ -144,6 +161,15 @@ def _judge_email(match: re.Match[str], ctx: _Context) -> _Verdict:
     return PiiType.EMAIL, SCORE_EMAIL
 
 
+def _judge_account(match: re.Match[str], ctx: _Context) -> _Verdict:
+    if not 10 <= len(_digits_of(match.group())) <= 14:
+        return None
+    # 주문번호·송장번호·사업자번호와 모양이 같아서 같은 줄이나 바로 윗줄에 키워드가 있을 때만 받는다
+    if not (_ACCOUNT_KEYWORD.search(ctx.line.text) or _ACCOUNT_KEYWORD.search(ctx.text_at(-1))):
+        return None
+    return PiiType.ACCOUNT, SCORE_ACCOUNT
+
+
 def _digits_of(text: str) -> str:
     return "".join(ch for ch in text if ch in _DIGITS)
 
@@ -171,6 +197,11 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(_PHONE, _judge_phone),
     # 가려진 카드번호: Luhn을 볼 수 없다
     _Rule(_MASKED_CARD, _judge_masked_card),
+    # 계좌번호: 검증 수단 없이 키워드로만 잡으므로 맨 뒤에 둔다.
+    # 주민번호(6-7), 전화번호(`010-1234-5678`)가 모두 계좌 모양이라 계좌 키워드가 있어도 앞 항목으로
+    # 본다. 휴대폰 번호를 계좌번호로 쓰는 평생계좌여도 가려지는 범위는 같다. 카드번호는 15·16자리라
+    # 계좌(10~14자리)와 길이로 갈린다
+    _Rule(_ACCOUNT, _judge_account),
 )
 
 
@@ -209,6 +240,7 @@ class RegexDetector:
     name = "regex"
 
     def detect(self, lines: Sequence[TextLine]) -> list[PiiSpan]:
+        texts = {line.id: line.text for line in lines}
         return [
             PiiSpan(
                 line_id=line.id,
@@ -219,5 +251,5 @@ class RegexDetector:
                 source=self.name,
             )
             for line in lines
-            for cand in _resolve(_candidates(_Context(line)))
+            for cand in _resolve(_candidates(_Context(line, texts)))
         ]

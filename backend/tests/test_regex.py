@@ -7,6 +7,7 @@ import pytest
 
 from backend.detectors.base import PiiType, TextLine
 from backend.detectors.regex import (
+    SCORE_ACCOUNT,
     SCORE_MASKED_CARD,
     SCORE_VALIDATED,
     RegexDetector,
@@ -219,3 +220,56 @@ def test_finds_masked_card(text, expected):
 )
 def test_ignores_non_masked_card(text):
     assert found(text) == []
+
+
+# --- 계좌번호 -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("texts", "expected"),
+    [
+        (["신한은행 110-123-456789"], "110-123-456789"),
+        (["국민은행 123456-78-901234 홍길동"], "123456-78-901234"),
+        (["국민 123456-78-901234"], "123456-78-901234"),
+        (["KB 123456-78-901234"], "123456-78-901234"),
+        (["카카오뱅크 3333-01-1234567"], "3333-01-1234567"),
+        (["새마을금고 9002-1234-5678-9"], "9002-1234-5678-9"),
+        (["계좌: 1002-123-456789"], "1002-123-456789"),
+        (["입금 302-1234-5678-91"], "302-1234-5678-91"),
+        (["예금주 홍길동 123-456789-12345"], "123-456789-12345"),
+        (["입금 계좌 안내", "110-123-456789"], "110-123-456789"),  # 바로 윗줄 키워드
+        (["은행: 우리은행", "1002 - 123 - 456789"], "1002 - 123 - 456789"),
+    ],
+)
+def test_finds_account(texts, expected):
+    spans = detector.detect(make_lines(texts))
+    assert [(texts[s.line_id][s.start : s.end], s.type) for s in spans] == [
+        (expected, PiiType.ACCOUNT)
+    ]
+    assert [s.score for s in spans] == [SCORE_ACCOUNT]
+
+
+@pytest.mark.parametrize(
+    "texts",
+    [
+        ["주문번호 110-123-456789"],  # 키워드 없음
+        ["운송장번호 1234-5678-9012"],
+        ["사업자번호 123-45-67890"],
+        ["계좌 안내", "기타 문의", "110-123-456789"],  # 키워드가 두 줄 위
+        ["110-123-456789", "입금 계좌"],  # 키워드가 아랫줄
+        ["계좌 123-456789"],  # 9자리
+        ["계좌 1234-5678-9012-345"],  # 15자리
+        ["계좌 110123456789"],  # 하이픈 그룹이 없음
+        ["우리 집 1002-123-456789"],  # 은행 이름이 아닌 "우리"
+    ],
+)
+def test_ignores_non_account(texts):
+    assert detector.detect(make_lines(texts)) == []
+
+
+def test_account_keyword_uses_line_id_not_list_position():
+    above = [TextLine(id=10, text="입금 계좌"), TextLine(id=11, text="110-123-456789")]
+    assert [s.type for s in detector.detect(above)] == [PiiType.ACCOUNT]
+    # 목록에서는 바로 앞이지만 id가 이어지지 않으면 바로 윗줄이 아니다
+    gap = [TextLine(id=10, text="입금 계좌"), TextLine(id=12, text="110-123-456789")]
+    assert detector.detect(gap) == []
