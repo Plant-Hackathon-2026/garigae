@@ -8,7 +8,13 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "easyocr==1.7.2",
     "fastapi>=0.162.0",
+    "numpy>=2.4.6",
+    "opencv-python-headless>=5.0.0.93",
+    "pillow>=13.0.0",
+    "pydantic-settings>=2.16.2",
+    "python-multipart>=0.0.32",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -18,3 +24,19 @@ backend = "backend:main"
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16.0",
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "ocr: 실제 EasyOCR 모델로 도는 느린 테스트 (제외: -m \"not ocr\")",
+]
+filterwarnings = [
+    # EasyOCR 내부 DataLoader가 MPS에서 내는 안내. 동작에는 영향 없음
+    "ignore:'pin_memory' argument is set as true but not supported on MPS:UserWarning",
+]
