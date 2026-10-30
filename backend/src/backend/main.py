@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api import router
 from backend.config import get_settings
 
 settings = get_settings()
@@ -19,13 +20,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(router)
 
 
 @app.get("/")
 def read_root():
     return {"message": "Hello from FastAPI backend!", "status": "ok"}
-
-
-@app.get("/api/health")
-def health_check():
-    return {"status": "healthy"}
