@@ -3,6 +3,8 @@
 번호는 모두 가짜다. 카드번호는 결제 테스트용으로 공개된 번호(4111 1111 1111 1111 등)를 쓴다.
 """
 
+import itertools
+
 import pytest
 
 from backend.detectors.base import PiiType, TextLine
@@ -438,3 +440,86 @@ def test_ocr_fix_does_not_break_original_match():
     assert score_of("|010-1234-5678|") == SCORE_VALIDATED
     # 관용 여권의 O는 숫자로 바꾸지 않는다 (여권번호는 원본에서만 찾는다)
     assert found("O12345678") == [("O12345678", PiiType.PASSPORT)]
+
+
+# --- 겹칠 때 우선순위 ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("texts", "expected"),
+    [
+        # 전화번호 모양이면 계좌 키워드가 있어도 전화번호
+        (["계좌 010-1234-5678"], [("010-1234-5678", PiiType.PHONE)]),
+        # 주민번호는 계좌 모양(6-7)이기도 하다
+        (["예금주 900101-1234567"], [("900101-1234567", PiiType.RESIDENT_ID)]),
+        # 운전면허번호도 계좌 모양이다
+        (["계좌 11-12-345678-90"], [("11-12-345678-90", PiiType.DRIVER_LICENSE)]),
+        (["입금", "서울 12-345678-90"], [("서울 12-345678-90", PiiType.DRIVER_LICENSE)]),
+        # 이메일 아이디 자리의 전화번호를 따로 내보내지 않는다
+        (["01012345678@example.com"], [("01012345678@example.com", PiiType.EMAIL)]),
+        # 한 줄에 여러 개면 왼쪽부터
+        (
+            ["보내는 분: 이영희 010-9876-5432 / hong@example.com"],
+            [("010-9876-5432", PiiType.PHONE), ("hong@example.com", PiiType.EMAIL)],
+        ),
+    ],
+)
+def test_overlap_keeps_one_by_priority(texts, expected):
+    lines = make_lines(texts)
+    assert [(texts[s.line_id][s.start : s.end], s.type) for s in detector.detect(lines)] == expected
+
+
+TRICKY_LINES = [
+    "계좌 010-1234-5678",
+    "예금주 900101-1234567 010-1234-5678",
+    "O1O-l234-5678 010-1234-5678",
+    "|010-1234-5678|",
+    "카드 4111-1111-1111-1111 / 1234-56**-****-7890",
+    "입금 11-12-345678-90 110-123-456789",
+    "01012345678@example.com",
+]
+
+
+@pytest.mark.parametrize("text", TRICKY_LINES)
+def test_spans_never_overlap(text):
+    spans = detector.detect([TextLine(id=0, text=text)])
+    for a, b in itertools.pairwise(spans):
+        assert a.end <= b.start
+
+
+# --- 샘플 문서 --------------------------------------------------------------------
+
+# 샘플 문서(`conftest.SAMPLE_DOCUMENTS`)에서 regex가 잡아야 하는 것 전부.
+# 송장의 운송장번호, 영수증의 사업자번호·승인번호, 이름·주소는 잡지 않는다
+EXPECTED_IN_SAMPLES = {
+    "id_card": [(2, "900101-1234567", PiiType.RESIDENT_ID)],
+    "delivery_label": [
+        (3, "010-1234-5678", PiiType.PHONE),
+        (5, "010-9876-5432", PiiType.PHONE),
+    ],
+    "messenger": [
+        (2, "123456-78-901234", PiiType.ACCOUNT),
+        (4, "010 2345 6789", PiiType.PHONE),
+    ],
+    "receipt": [(3, "1234-56**-****-7890", PiiType.CARD)],
+    "bank_notice": [
+        (2, "110-123-456789", PiiType.ACCOUNT),
+        (4, "help@example.com", PiiType.EMAIL),
+    ],
+}
+
+
+@pytest.mark.parametrize("document", EXPECTED_IN_SAMPLES)
+def test_sample_documents(sample_lines, document):
+    lines = sample_lines[document]
+    texts = {line.id: line.text for line in lines}
+    spans = detector.detect(lines)
+    assert [
+        (s.line_id, texts[s.line_id][s.start : s.end], s.type) for s in spans
+    ] == EXPECTED_IN_SAMPLES[document]
+
+
+def test_spans_are_sorted_by_line_and_position(sample_lines):
+    for lines in sample_lines.values():
+        spans = detector.detect(lines)
+        assert spans == sorted(spans, key=lambda s: (s.line_id, s.start))
