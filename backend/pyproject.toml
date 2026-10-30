@@ -18,6 +18,10 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
 ]
 
+[project.optional-dependencies]
+# NER 감지기 의존성 (transformers 등). 설치: uv sync --extra ner
+ner = []
+
 [project.scripts]
 backend = "backend:main"
 
