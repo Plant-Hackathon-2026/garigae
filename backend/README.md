@@ -49,6 +49,14 @@ uv run pytest -m ocr          # 실제 OCR 테스트만
 | `GARIGAE_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 프론트 허용 출처 |
 | `GARIGAE_DETECTORS` | `regex,rules` | 켤 감지기: `regex`, `rules`, `ner` |
 
+## 샘플 이미지
+
+`tests/fixtures/`에 가짜 데이터 샘플 이미지와 정답 영역(`<이름>.json`)이 있습니다. 실제 OCR 테스트(`-m ocr`)가 씁니다.
+
+```bash
+uv run python scripts/make_samples.py   # 다시 만들기 (macOS AppleSDGothicNeo 기준)
+```
+
 ## OCR 처리 시간 재기
 
 가짜 데이터 이미지로 장치와 처리 시간을 확인합니다. 위 환경변수를 그대로 따릅니다.
