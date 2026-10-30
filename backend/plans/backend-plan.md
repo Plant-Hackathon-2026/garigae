@@ -56,14 +56,14 @@
 | OCR | EasyOCR 1.7.2, 언어 `["ko", "en"]` | `gpu=True`면 CUDA → MPS → CPU 순으로 자동 선택 (1.7.2 소스에서 확인). Mac은 MPS, GPU 서버는 CUDA |
 | 이미지 처리 | Pillow(입출력, EXIF), OpenCV + NumPy(블러·모자이크) | `opencv-python-headless`는 EasyOCR 의존성으로 이미 들어옴 |
 | 설정 | `pydantic-settings` | 환경변수 `GARIGAE_*` |
-| 테스트 | pytest + httpx(TestClient) | OCR은 가짜 엔진으로 바꿔 끼워서 빠르게 테스트 |
+| 테스트 | pytest + httpx2(TestClient) | OCR은 가짜 엔진으로 바꿔 끼워서 빠르게 테스트. Starlette 1.x TestClient가 httpx 대신 httpx2를 씀 |
 | 패키지 | uv (기존 유지) | PyPI torch는 Linux x86_64용이 CUDA 빌드, macOS용이 MPS 빌드라 lock 하나로 양쪽 모두 동작 |
 
 ## 처리 흐름
 
 ```
 업로드 이미지
-  ↓ image_io: 형식·크기 검사, EXIF 방향 보정
+  ↓ image_io: 형식·크기 검사, EXIF 회전 정보 적용 (90° 단위, 기울기 보정 아님)
   ↓ ocr: EasyOCR readtext → 글자 박스(segment) 목록
   ↓ lines: 같은 줄의 박스를 묶어 줄 텍스트로 재구성 (문자 위치 ↔ 박스 매핑 유지)
   ↓ detectors: regex / rules / ner 감지기가 각각 "줄 + 문자 구간 + 항목 종류" 반환
@@ -169,7 +169,7 @@ NER 담당자와 맞출 약속:
 
 ## API
 
-모든 좌표는 **EXIF 방향 보정 후 원본 이미지 픽셀 기준**이다. 브라우저도 EXIF 방향을 적용해서 보여주므로 프론트는 `image.width`, `image.height`로 화면 크기에 맞게 비율만 맞추면 된다.
+모든 좌표는 **EXIF 회전 정보를 적용한 원본 이미지 픽셀 기준**이다. 회전 정보는 폰 카메라가 EXIF에 적어 두는 90° 단위 방향 값이고, 기울어진 사진을 펴는 처리는 하지 않는다. 브라우저도 이 값을 적용해서 보여주므로 프론트는 `image.width`, `image.height`로 화면 크기에 맞게 비율만 맞추면 된다.
 
 영역은 **`polygon` 하나로만** 주고받는다. 수평 사각형(`bbox`)은 따로 주지 않는다.
 
@@ -286,7 +286,7 @@ backend/
     config.py            # Settings (GARIGAE_* 환경변수)
     api.py               # 라우터: detect, redact, redact/auto, health, pii-types
     schemas.py           # 요청·응답 Pydantic 모델
-    image_io.py          # 디코딩, 형식·크기 검사, EXIF 보정·제거, 인코딩
+    image_io.py          # 디코딩, 형식·크기 검사, EXIF 회전 정보 적용·메타데이터 제거, 인코딩
     ocr.py               # OcrEngine 프로토콜 + EasyOcrEngine (스레드 락으로 직렬화)
     lines.py             # 박스 → 줄 재구성, 문자 위치 매핑
     geometry.py          # 문자 구간 → 다각형, 여백, 여러 다각형 합치기
@@ -305,7 +305,7 @@ backend/
     test_lines.py
     test_geometry.py
     test_masking.py      # 영역 안만 바뀌고 밖은 그대로인지
-    test_image_io.py     # EXIF 방향 보정, 결과에 EXIF·XMP·썸네일이 없고 ICC는 남는지
+    test_image_io.py     # EXIF 회전 정보 적용, 결과에 EXIF·XMP·썸네일이 없고 ICC는 남는지
     test_api.py          # 가짜 OCR 엔진으로 엔드포인트 검사
     test_e2e_ocr.py      # 실제 EasyOCR (느림, @pytest.mark.ocr)
   scripts/
@@ -348,7 +348,7 @@ GPU 서버 사양을 아직 모르므로 두 경로를 준비한다.
   - 정규식 감지기: 식별번호, 연락처, 금융정보 (검증 로직 포함)
   - 블러 마스킹
   - `/api/detect`, `/api/redact`, `/api/redact/auto`
-  - 이미지 무저장, EXIF 방향 보정·제거, 파일 검사
+  - 이미지 무저장, EXIF 회전 정보 적용·메타데이터 제거, 파일 검사
   - NER 감지기 인터페이스 + 스텁
   - 가짜 샘플 이미지, 감지기 단위 테스트
 - **Should**
