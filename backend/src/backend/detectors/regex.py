@@ -2,7 +2,7 @@
 
 줄마다 이렇게 처리한다.
 
-1. 항목별 정규식을 돌리고 검증(날짜 등)을 통과한 것만 후보로 남긴다
+1. 항목별 정규식을 돌리고 검증(날짜, Luhn)을 통과한 것만 후보로 남긴다
 2. 같은 구간을 여러 항목이 잡으면 우선순위(`_RULES` 순서)가 앞선 하나만 남긴다
 
 감지 기준은 `plans/backend-plan.md`의 "감지 규칙 > 정규식 감지기" 표를 따른다.
@@ -17,10 +17,14 @@ from backend.detectors.base import PiiSpan, PiiType, TextLine
 
 # score 기준. 형식 검증까지 통과하면 높게, 형식만 맞거나 키워드 조건으로만 잡으면 낮게 준다.
 # 파이프라인이 여기에 OCR 신뢰도를 곱해 응답의 confidence로 쓴다.
-# 검증 통과: 주민·외국인등록번호(날짜), 전화번호(국번·자릿수)
+# 검증 통과: 주민·외국인등록번호(날짜), 카드번호(Luhn), 전화번호(국번·자릿수)
 SCORE_VALIDATED = 0.9
 # 이메일은 별도 검증이 없지만 `@`와 도메인 형식 자체가 분명하다
 SCORE_EMAIL = 0.9
+# 일부가 가려져 Luhn을 볼 수 없음
+SCORE_MASKED_CARD = 0.75
+
+_DIGITS = frozenset("0123456789")
 
 # --- 패턴 ---------------------------------------------------------------------
 # 모든 패턴은 re.ASCII로 컴파일한다. `\d`는 0-9, `\s`는 ASCII 공백만 뜻한다.
@@ -40,6 +44,21 @@ def _compile(pattern: str, flags: int = 0) -> re.Pattern[str]:
 # 주민·외국인등록번호: YYMMDD + 구분자 + 뒷자리 첫 숫자(주민 1-4, 외국인 5-8) + 6자리
 _RESIDENT = _compile(
     rf"{_START}(?P<yy>\d{{2}})(?P<mm>\d{{2}})(?P<dd>\d{{2}}){_SEP}(?P<gender>[1-8])\d{{6}}{_END}"
+)
+
+# 카드번호: 4-4-4-4(16자리), 아멕스 4-6-5(15자리, 34·37로 시작)
+_CARD_16 = rf"\d{{4}}(?:{_SEP}\d{{4}}){{3}}"
+_CARD_AMEX = rf"3[47]\d{{2}}{_SEP}\d{{6}}{_SEP}\d{{5}}"
+_CARD = _compile(rf"{_START}(?:{_CARD_16}|{_CARD_AMEX}){_END}")
+
+# 일부가 가려진 카드번호 (`1234-56**-****-7890`). 영수증에서 흔한 가림 문자를 받는다
+_MASK_CHARS = frozenset("*＊xX#●•")
+_MASKABLE = r"[\d*＊xX#●•]"
+_MASKED_16 = rf"{_MASKABLE}{{4}}(?:{_SEP}{_MASKABLE}{{4}}){{3}}"
+_MASKED_AMEX = rf"{_MASKABLE}{{4}}{_SEP}{_MASKABLE}{{6}}{_SEP}{_MASKABLE}{{5}}"
+_MASKED_CARD = _compile(
+    rf"(?<![0-9A-Za-z*＊#●•])(?<!\d-)(?:{_MASKED_16}|{_MASKED_AMEX})"
+    rf"(?![0-9A-Za-z*＊#●•])(?!-{_MASKABLE})"
 )
 
 # 전화번호: 국번 + 3~4자리 + 4자리. `(02) 1234-5678`, `02)1234-5678`처럼 괄호 쓴 국번도 받는다
@@ -90,6 +109,32 @@ def _is_valid_date(year: int, month: int, day: int) -> bool:
     return True
 
 
+def _judge_card(match: re.Match[str], ctx: _Context) -> _Verdict:
+    if not _luhn_ok(_digits_of(match.group())):
+        return None
+    return PiiType.CARD, SCORE_VALIDATED
+
+
+def _luhn_ok(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        n = int(ch)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
+
+def _judge_masked_card(match: re.Match[str], ctx: _Context) -> _Verdict:
+    text = match.group()
+    # 가림 문자가 없으면 `_CARD`가 맡을 몫이고, 숫자가 하나도 없으면 가릴 정보가 없다
+    if not _MASK_CHARS.intersection(text) or not _DIGITS.intersection(text):
+        return None
+    return PiiType.CARD, SCORE_MASKED_CARD
+
+
 def _judge_phone(match: re.Match[str], ctx: _Context) -> _Verdict:
     # 국번과 자릿수는 패턴이 이미 확인했다
     return PiiType.PHONE, SCORE_VALIDATED
@@ -97,6 +142,10 @@ def _judge_phone(match: re.Match[str], ctx: _Context) -> _Verdict:
 
 def _judge_email(match: re.Match[str], ctx: _Context) -> _Verdict:
     return PiiType.EMAIL, SCORE_EMAIL
+
+
+def _digits_of(text: str) -> str:
+    return "".join(ch for ch in text if ch in _DIGITS)
 
 
 # --- 규칙과 우선순위 ------------------------------------------------------------
@@ -116,8 +165,12 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(_EMAIL, _judge_email),
     # 주민·외국인등록번호: 13자리 + 날짜 검사
     _Rule(_RESIDENT, _judge_resident),
+    # 카드번호: Luhn 검사
+    _Rule(_CARD, _judge_card),
     # 전화번호: 국번·자릿수 검사
     _Rule(_PHONE, _judge_phone),
+    # 가려진 카드번호: Luhn을 볼 수 없다
+    _Rule(_MASKED_CARD, _judge_masked_card),
 )
 
 

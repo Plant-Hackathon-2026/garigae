@@ -1,12 +1,13 @@
 """정규식 감지기 테스트. 항목별로 맞아야 하는 예 / 틀려야 하는 예 표를 둔다.
 
-번호는 모두 가짜다.
+번호는 모두 가짜다. 카드번호는 결제 테스트용으로 공개된 번호(4111 1111 1111 1111 등)를 쓴다.
 """
 
 import pytest
 
 from backend.detectors.base import PiiType, TextLine
 from backend.detectors.regex import (
+    SCORE_MASKED_CARD,
     SCORE_VALIDATED,
     RegexDetector,
 )
@@ -155,4 +156,66 @@ def test_finds_email(text, expected):
     ],
 )
 def test_ignores_non_email(text):
+    assert found(text) == []
+
+
+# --- 카드번호 -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("4111-1111-1111-1111", "4111-1111-1111-1111"),
+        ("카드 4242 4242 4242 4242 승인", "4242 4242 4242 4242"),
+        ("5555555555554444", "5555555555554444"),  # 구분자 없음
+        ("1234-5678-9012-3452", "1234-5678-9012-3452"),
+        ("3782-822463-10005", "3782-822463-10005"),  # 아멕스
+        ("3714 496353 98431", "3714 496353 98431"),
+    ],
+)
+def test_finds_card(text, expected):
+    assert found(text) == [(expected, PiiType.CARD)]
+    assert score_of(text) == SCORE_VALIDATED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "4111-1111-1111-1112",  # Luhn 실패
+        "3782-822463-10006",  # Luhn 실패
+        "4111-111111-11116",  # Luhn은 맞지만 4-6-5인데 아멕스(34·37)가 아님
+        "94111-1111-1111-1111",  # 앞이 숫자로 이어짐
+        "4111-1111-1111-11111",  # 뒤가 숫자로 이어짐
+        "4111-1111-1111-1111-2222",  # 더 긴 번호의 일부
+    ],
+)
+def test_ignores_non_card(text):
+    assert found(text) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("카드번호 1234-56**-****-7890", "1234-56**-****-7890"),
+        ("1234-****-****-7890", "1234-****-****-7890"),
+        ("**** **** **** 7890", "**** **** **** 7890"),
+        ("4111-11XX-XXXX-1111", "4111-11XX-XXXX-1111"),  # X로 가림
+        ("123456******7890", "123456******7890"),
+        ("3782-82****-*0005", "3782-82****-*0005"),  # 아멕스
+    ],
+)
+def test_finds_masked_card(text, expected):
+    assert found(text) == [(expected, PiiType.CARD)]
+    assert score_of(text) == SCORE_MASKED_CARD
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "****-****-****-****",  # 숫자가 하나도 없음
+        "1234-56**-****-78901",  # 뒤가 숫자로 이어짐
+        "1234-56**-****",  # 그룹 부족
+    ],
+)
+def test_ignores_non_masked_card(text):
     assert found(text) == []
