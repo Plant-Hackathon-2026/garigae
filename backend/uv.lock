@@ -70,6 +70,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
+provides-extras = ["ner"]
 
 [package.metadata.requires-dev]
 dev = [
