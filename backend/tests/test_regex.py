@@ -7,12 +7,14 @@ import pytest
 
 from backend.detectors.base import PiiType, TextLine
 from backend.detectors.regex import (
+    OCR_FIX_PENALTY,
     SCORE_ACCOUNT,
     SCORE_MASKED_CARD,
     SCORE_PASSPORT,
     SCORE_PASSPORT_WITH_KEYWORD,
     SCORE_VALIDATED,
     RegexDetector,
+    normalize_ocr,
 )
 
 detector = RegexDetector()
@@ -365,3 +367,74 @@ def test_account_keyword_uses_line_id_not_list_position():
     # 목록에서는 바로 앞이지만 id가 이어지지 않으면 바로 윗줄이 아니다
     gap = [TextLine(id=10, text="입금 계좌"), TextLine(id=12, text="110-123-456789")]
     assert detector.detect(gap) == []
+
+
+# --- OCR 오인식 보정 -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("O1O-l234-5678", "010-1234-5678"),
+        ("010-1234-567O", "010-1234-5670"),
+        ("o1o-I234-5678", "010-1234-5678"),
+        ("010-1234-|234", "010-1234-1234"),
+        ("010—1234—5678", "010-1234-5678"),
+        ("010–1234–5678", "010-1234-5678"),
+        ("010一1234一5678", "010-1234-5678"),
+        ("010~1234~5678", "010-1234-5678"),
+        ("O1O—l234—5678", "010-1234-5678"),  # 글자 치환 뒤에 숫자 사이가 된 대시
+        ("연락처O1O-1234-5678", "연락처010-1234-5678"),  # 한글이 붙은 것은 숫자 문맥
+    ],
+)
+def test_normalize_ocr_fixes_digit_context(text, expected):
+    assert normalize_ocr(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hong.test@example.com",
+        "hello1",  # 영문 단어에 붙은 숫자
+        "Iol",  # 진짜 숫자가 없음
+        "Hello World 2026",
+        "Tel 010",
+        "M1234567O",  # 영문자가 붙은 구간
+        "가나一다",  # 숫자 사이가 아닌 대시
+        "10 ~ 20",  # 공백이 끼면 숫자 사이가 아님
+        "| 이름 |",
+    ],
+)
+def test_normalize_ocr_keeps_words(text):
+    assert normalize_ocr(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "pii_type"),
+    [
+        ("O1O-l234-5678", "O1O-l234-5678", PiiType.PHONE),
+        ("연락처: 010一1234一5678", "010一1234一5678", PiiType.PHONE),
+        ("9OO1O1-l234567", "9OO1O1-l234567", PiiType.RESIDENT_ID),
+        ("4111 1111 1111 111l", "4111 1111 1111 111l", PiiType.CARD),
+        ("4111—1111—1111—1111", "4111—1111—1111—1111", PiiType.CARD),
+        ("카드 1234-56**-****-789O", "1234-56**-****-789O", PiiType.CARD),
+        ("서울 l2-345678-9O", "서울 l2-345678-9O", PiiType.DRIVER_LICENSE),
+        ("신한은행 11O-123-456789", "11O-123-456789", PiiType.ACCOUNT),
+    ],
+)
+def test_finds_after_ocr_fix(text, expected, pii_type):
+    # 보정한 사본에서 찾아도 문자 위치는 원본 기준이라, 잘라 낸 원본 글자에 오인식 글자가 그대로 있다
+    assert found(text) == [(expected, pii_type)]
+
+
+def test_ocr_fix_lowers_score_slightly():
+    assert score_of("010-1234-5678") == SCORE_VALIDATED
+    assert score_of("O1O-1234-5678") == pytest.approx(SCORE_VALIDATED - OCR_FIX_PENALTY)
+
+
+def test_ocr_fix_does_not_break_original_match():
+    # `|`를 1로 바꾸면 뒤에 숫자가 붙어 경계가 깨지지만, 원본에서 잡은 것이 남는다
+    assert found("|010-1234-5678|") == [("010-1234-5678", PiiType.PHONE)]
+    assert score_of("|010-1234-5678|") == SCORE_VALIDATED
+    # 관용 여권의 O는 숫자로 바꾸지 않는다 (여권번호는 원본에서만 찾는다)
+    assert found("O12345678") == [("O12345678", PiiType.PASSPORT)]

@@ -2,8 +2,10 @@
 
 줄마다 이렇게 처리한다.
 
-1. 항목별 정규식을 돌리고 검증(날짜, Luhn, 지역 코드, 키워드)을 통과한 것만 후보로 남긴다
-2. 같은 구간을 여러 항목이 잡으면 우선순위(`_RULES` 순서)가 앞선 하나만 남긴다
+1. 원본과, OCR 오인식을 보정한 사본(`normalize_ocr`)을 준비한다.
+   길이가 같아서 사본에서 찾은 문자 위치를 원본에 그대로 쓴다
+2. 항목별 정규식을 돌리고 검증(날짜, Luhn, 지역 코드, 키워드)을 통과한 것만 후보로 남긴다
+3. 같은 구간을 여러 항목이 잡으면 우선순위(`_RULES` 순서)가 앞선 하나만 남긴다
 
 감지 기준은 `plans/backend-plan.md`의 "감지 규칙 > 정규식 감지기" 표를 따른다.
 """
@@ -29,8 +31,48 @@ SCORE_PASSPORT = 0.6
 SCORE_MASKED_CARD = 0.75
 # 검증 수단이 없고 키워드 조건으로만 잡음
 SCORE_ACCOUNT = 0.7
+# OCR 오인식 보정으로 바꾼 글자가 들어 있는 구간은 조금 깎는다
+OCR_FIX_PENALTY = 0.05
 
 _DIGITS = frozenset("0123456789")
+
+# --- OCR 오인식 보정 ----------------------------------------------------------
+
+_DIGIT_LOOKALIKES = str.maketrans("OolI|", "00111")
+_DIGIT_LIKE_RUN = re.compile(r"[0-9OolI|]+")
+# 계획 문서의 `— – 一 ~`에 같은 역할의 하이픈·마이너스 변형(U+2010 U+2011 U+2212 U+FF0D)을 더했다
+_DASH_LOOKALIKES = frozenset("—–一~‐‑−－")
+
+
+def normalize_ocr(text: str) -> str:
+    """숫자 문맥에서 OCR이 자주 틀리는 글자를 바꾼 사본을 돌려준다. 길이는 원본과 같다.
+
+    숫자 문맥은 이렇게 정한다.
+
+    - `O` `o` → `0`, `l` `I` `|` → `1`: `[0-9OolI|]`로만 이뤄진 연속 구간에 진짜 숫자가
+      하나 이상 있고, 그 구간 바로 앞뒤에 다른 영문자가 붙어 있지 않을 때만 바꾼다.
+      `O1O-l234`는 `010-1234`가 되고, `hello1`, `Iol`, `example.com`은 그대로다
+    - `—` `–` `一` `~` 등 → `-`: 바로 앞뒤 글자가 둘 다 숫자일 때만 바꾼다 (위 치환을 마친 뒤 기준)
+
+    `M1234567O`처럼 영문자가 붙은 구간은 단어일 수 있어 건드리지 않는다.
+    """
+    chars = list(text)
+    for match in _DIGIT_LIKE_RUN.finditer(text):
+        run = match.group()
+        if not _DIGITS.intersection(run) or _DIGITS.issuperset(run):
+            continue
+        if _is_ascii_letter_at(text, match.start() - 1) or _is_ascii_letter_at(text, match.end()):
+            continue
+        chars[match.start() : match.end()] = run.translate(_DIGIT_LOOKALIKES)
+    for i in range(1, len(chars) - 1):
+        if chars[i] in _DASH_LOOKALIKES and chars[i - 1] in _DIGITS and chars[i + 1] in _DIGITS:
+            chars[i] = "-"
+    return "".join(chars)
+
+
+def _is_ascii_letter_at(text: str, index: int) -> bool:
+    return 0 <= index < len(text) and text[index].isascii() and text[index].isalpha()
+
 
 # --- 패턴 ---------------------------------------------------------------------
 # 모든 패턴은 re.ASCII로 컴파일한다. `\d`는 0-9, `\s`는 ASCII 공백만 뜻한다.
@@ -224,6 +266,8 @@ def _digits_of(text: str) -> str:
 class _Rule:
     pattern: re.Pattern[str]
     judge: Callable[[re.Match[str], _Context], _Verdict]
+    # OCR 보정 사본에도 돌릴지. 영문이 주인 항목은 보정이 도움이 안 되고 원본에만 돌린다
+    ocr_fix: bool = True
 
 
 # 같은 구간을 여러 항목이 잡으면 이 목록에서 앞선 규칙 하나만 남긴다.
@@ -231,7 +275,7 @@ class _Rule:
 _RULES: tuple[_Rule, ...] = (
     # 이메일: `@`와 도메인이 분명하다. 아이디 자리에 전화번호가 있어도(`01012345678@...`) 전체가
     # 이메일이고, 전화번호를 먼저 두면 도메인 부분이 안 가려진다
-    _Rule(_EMAIL, _judge_email),
+    _Rule(_EMAIL, _judge_email, ocr_fix=False),
     # 주민·외국인등록번호: 13자리 + 날짜 검사
     _Rule(_RESIDENT, _judge_resident),
     # 카드번호: Luhn 검사
@@ -241,7 +285,7 @@ _RULES: tuple[_Rule, ...] = (
     # 전화번호: 국번·자릿수 검사
     _Rule(_PHONE, _judge_phone),
     # 여권번호: 형식만 보고 잡는 경우가 많다. 영문+숫자라 숫자 항목과는 거의 겹치지 않는다
-    _Rule(_PASSPORT, _judge_passport),
+    _Rule(_PASSPORT, _judge_passport, ocr_fix=False),
     # 가려진 카드번호: Luhn을 볼 수 없다
     _Rule(_MASKED_CARD, _judge_masked_card),
     # 계좌번호: 검증 수단 없이 키워드로만 잡으므로 맨 뒤에 둔다.
@@ -262,22 +306,33 @@ class _Candidate:
 
 
 def _candidates(ctx: _Context) -> list[_Candidate]:
+    original = ctx.line.text
+    fixed = normalize_ocr(original)
     found: list[_Candidate] = []
     for rank, rule in enumerate(_RULES):
-        for match in rule.pattern.finditer(ctx.line.text):
-            verdict = rule.judge(match, ctx)
-            if verdict is None:
-                continue
-            pii_type, score = verdict
-            start, end = match.span()
-            found.append(_Candidate(start, end, pii_type, score, rank))
+        variants = [(original, False)]
+        if rule.ocr_fix and fixed != original:
+            variants.append((fixed, True))
+        for variant, is_fixed in variants:
+            for match in rule.pattern.finditer(variant):
+                verdict = rule.judge(match, ctx)
+                if verdict is None:
+                    continue
+                pii_type, score = verdict
+                start, end = match.span()
+                if is_fixed and fixed[start:end] != original[start:end]:
+                    score = round(score - OCR_FIX_PENALTY, 2)
+                found.append(_Candidate(start, end, pii_type, score, rank))
     return found
 
 
 def _resolve(candidates: list[_Candidate]) -> list[_Candidate]:
-    """겹치는 후보 중 우선순위가 앞선 것만 남긴다."""
+    """겹치는 후보 중 우선순위가 앞선 것만 남긴다.
+
+    같은 규칙끼리는 긴 것, 그다음 점수가 높은 것(보정하지 않은 원본)이 먼저다.
+    """
     chosen: list[_Candidate] = []
-    for cand in sorted(candidates, key=lambda c: (c.rank, c.start)):
+    for cand in sorted(candidates, key=lambda c: (c.rank, c.start - c.end, -c.score, c.start)):
         if all(cand.end <= other.start or other.end <= cand.start for other in chosen):
             chosen.append(cand)
     return sorted(chosen, key=lambda c: c.start)
