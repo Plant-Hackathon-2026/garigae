@@ -87,6 +87,16 @@ def test_ignores_non_resident_id(text):
         ("011-123-4567", "011-123-4567"),
         ("010.1234.5678", "010.1234.5678"),
         ("010 -1234 -5678", "010 -1234 -5678"),  # 박스 사이 공백
+        ("02-123-4567", "02-123-4567"),  # 서울
+        ("02-1234-5678", "02-1234-5678"),
+        ("(02) 1234-5678", "(02) 1234-5678"),
+        ("TEL 02)1234-5678", "02)1234-5678"),
+        ("031-123-4567", "031-123-4567"),
+        ("044-123-4567", "044-123-4567"),  # 세종
+        ("064-1234-5678", "064-1234-5678"),
+        ("070-1234-5678", "070-1234-5678"),  # 인터넷 전화
+        ("0505-123-4567", "0505-123-4567"),  # 안심번호
+        ("0504-1234-5678", "0504-1234-5678"),
         ("전화 010-1234-5678입니다", "010-1234-5678"),
     ],
 )
@@ -103,8 +113,46 @@ def test_finds_phone(text, expected):
         "9010-1234-56789",  # 앞뒤가 숫자로 이어짐
         "010-1234-56789",  # 뒤가 숫자로 이어짐
         "010-1234-5678-12",  # 더 긴 번호의 일부
+        "고객센터 1588-1234",  # 대표번호
+        "1644-1234",
+        "1899-1234",
+        "080-123-4567",  # 수신자 부담 (업체 번호)
+        "034-123-4567",  # 없는 지역번호
+        "02-12-3456",  # 자릿수 부족
         "010-12-5678",
     ],
 )
 def test_ignores_non_phone(text):
+    assert found(text) == []
+
+
+# --- 이메일 -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("문의: help@example.com", "help@example.com"),
+        ("hong.test@example.co.kr", "hong.test@example.co.kr"),
+        ("user_01+tag@mail-server.example.com", "user_01+tag@mail-server.example.com"),
+        ("메일help@example.com으로 보내 주세요", "help@example.com"),
+        ("hong.test @example.com", "hong.test @example.com"),  # 박스 사이 공백
+        ("01012345678@example.com", "01012345678@example.com"),  # 아이디가 전화번호여도 이메일 하나
+    ],
+)
+def test_finds_email(text, expected):
+    assert found(text) == [(expected, PiiType.EMAIL)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "help@example",  # 최상위 도메인 없음
+        "@example.com",
+        "help@.com",
+        # 실제 EasyOCR가 hong.test@example.com을 이렇게 읽은 적이 있다. 빠진 `.`을 추측해 채우지 않는다
+        "hong test@examplecom",
+    ],
+)
+def test_ignores_non_email(text):
     assert found(text) == []
