@@ -2,7 +2,7 @@
 
 줄마다 이렇게 처리한다.
 
-1. 항목별 정규식을 돌리고 검증(날짜, Luhn, 키워드)을 통과한 것만 후보로 남긴다
+1. 항목별 정규식을 돌리고 검증(날짜, Luhn, 지역 코드, 키워드)을 통과한 것만 후보로 남긴다
 2. 같은 구간을 여러 항목이 잡으면 우선순위(`_RULES` 순서)가 앞선 하나만 남긴다
 
 감지 기준은 `plans/backend-plan.md`의 "감지 규칙 > 정규식 감지기" 표를 따른다.
@@ -17,10 +17,14 @@ from backend.detectors.base import PiiSpan, PiiType, TextLine
 
 # score 기준. 형식 검증까지 통과하면 높게, 형식만 맞거나 키워드 조건으로만 잡으면 낮게 준다.
 # 파이프라인이 여기에 OCR 신뢰도를 곱해 응답의 confidence로 쓴다.
-# 검증 통과: 주민·외국인등록번호(날짜), 카드번호(Luhn), 전화번호(국번·자릿수)
+# 검증 통과: 주민·외국인등록번호(날짜), 카드번호(Luhn), 운전면허번호(지역 코드),
+# 전화번호(국번·자릿수)
 SCORE_VALIDATED = 0.9
 # 이메일은 별도 검증이 없지만 `@`와 도메인 형식 자체가 분명하다
 SCORE_EMAIL = 0.9
+SCORE_PASSPORT_WITH_KEYWORD = 0.9
+# 여권번호 형식만 맞음. 영문 1자 + 숫자 8자리라 제품·주문 코드와 헷갈릴 수 있다
+SCORE_PASSPORT = 0.6
 # 일부가 가려져 Luhn을 볼 수 없음
 SCORE_MASKED_CARD = 0.75
 # 검증 수단이 없고 키워드 조건으로만 잡음
@@ -37,6 +41,7 @@ _END = r"(?!-?\d)"
 # 번호 사이 구분자: 하이픈, 공백 하나, 없음.
 # 줄 재구성이 OCR 박스를 공백으로 이어 붙이므로 하이픈 앞뒤 공백 하나씩도 허용한다 (`010 -1234`)
 _SEP = r"(?:\s?-\s?|\s)?"
+_SEP_REQUIRED = r"(?:\s?-\s?|\s)"
 
 
 def _compile(pattern: str, flags: int = 0) -> re.Pattern[str]:
@@ -63,6 +68,24 @@ _MASKED_CARD = _compile(
     rf"(?![0-9A-Za-z*＊#●•])(?!-{_MASKABLE})"
 )
 
+# 운전면허번호.
+# - 현행 `NN-NN-NNNNNN-NN`: 지역 코드 2 + 발급 연도 2 + 일련번호 6 + 검증·재발급 2
+# - 구형 `서울 NN-NNNNNN-NN`: 지역 코드 자리에 지역명. 2014년 3분기부터 숫자 코드로 바뀌었다
+# 지역 코드: 11 서울, 12 부산, 13 경기(남부), 14 강원, 15 충북, 16 충남, 17 전북, 18 전남,
+# 19 경북, 20 경남, 21 제주, 22 대구, 23 인천, 24 광주, 25 대전, 26 울산, 28 경기북부.
+# 27은 결번이다(세종은 면허를 따로 관할하지 않음). 경기북부(28)는 구형 지역명이 없다.
+# 근거: Microsoft Purview "South Korea driver's license number" 정의(허용 코드 11-26, 28),
+# 지역별 코드 표를 정리한 공개 게시글.
+# 구분자가 없는 12자리는 택배 송장번호(12자리)와 겹쳐서 받지 않는다
+_LICENSE_REGION_CODES = frozenset(f"{code:02d}" for code in [*range(11, 27), 28])
+_LICENSE_REGION_NAMES = (
+    "서울|부산|경기|강원|충북|충남|전북|전남|경북|경남|제주|대구|인천|광주|대전|울산"
+)
+_LICENSE_HEAD = rf"(?:(?P<code>\d{{2}}){_SEP_REQUIRED}|(?:{_LICENSE_REGION_NAMES})\s?)"
+_DRIVER_LICENSE = _compile(
+    rf"{_START}{_LICENSE_HEAD}\d{{2}}{_SEP_REQUIRED}\d{{6}}{_SEP_REQUIRED}\d{{2}}{_END}"
+)
+
 # 전화번호: 국번 + 3~4자리 + 4자리. `(02) 1234-5678`, `02)1234-5678`처럼 괄호 쓴 국번도 받는다
 # - 휴대폰 010·011·016·017·018·019
 # - 유선 02(서울), 031-033, 041-044, 051-055, 061-064 (계획의 `0[3-6][1-5]` 중 실제 지역번호만)
@@ -79,6 +102,12 @@ _EMAIL = _compile(
     r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9][A-Za-z0-9._%+-]*\s?@\s?"
     r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])"
 )
+
+# 여권번호: 구형 `[MSRODG]` + 8자리, 차세대 `[MSRODG]` + 3자리 + 영문 + 4자리
+_PASSPORT = _compile(r"(?<![A-Za-z0-9])[MSRODG](?:\d{8}|\d{3}[A-Z]\d{4})(?![A-Za-z0-9])")
+_PASSPORT_KEYWORD = _compile(r"여권|passport", re.IGNORECASE)
+# 여권 정보면은 "여권번호/Passport No." 라벨 아래 한두 줄에 번호가 오므로 위아래 2줄까지 본다
+_PASSPORT_KEYWORD_LINES = 2
 
 # 계좌번호: 하이픈으로 나뉜 그룹이 2개 이상인 숫자열 전체. 숫자 개수(10~14)는 검증에서 본다
 _ACCOUNT = _compile(rf"{_START}\d+(?:\s?-\s?\d+)+{_END}")
@@ -152,6 +181,13 @@ def _judge_masked_card(match: re.Match[str], ctx: _Context) -> _Verdict:
     return PiiType.CARD, SCORE_MASKED_CARD
 
 
+def _judge_driver_license(match: re.Match[str], ctx: _Context) -> _Verdict:
+    code = match["code"]
+    if code is not None and code not in _LICENSE_REGION_CODES:
+        return None
+    return PiiType.DRIVER_LICENSE, SCORE_VALIDATED
+
+
 def _judge_phone(match: re.Match[str], ctx: _Context) -> _Verdict:
     # 국번과 자릿수는 패턴이 이미 확인했다
     return PiiType.PHONE, SCORE_VALIDATED
@@ -159,6 +195,13 @@ def _judge_phone(match: re.Match[str], ctx: _Context) -> _Verdict:
 
 def _judge_email(match: re.Match[str], ctx: _Context) -> _Verdict:
     return PiiType.EMAIL, SCORE_EMAIL
+
+
+def _judge_passport(match: re.Match[str], ctx: _Context) -> _Verdict:
+    window = range(-_PASSPORT_KEYWORD_LINES, _PASSPORT_KEYWORD_LINES + 1)
+    if any(_PASSPORT_KEYWORD.search(ctx.text_at(offset)) for offset in window):
+        return PiiType.PASSPORT, SCORE_PASSPORT_WITH_KEYWORD
+    return PiiType.PASSPORT, SCORE_PASSPORT
 
 
 def _judge_account(match: re.Match[str], ctx: _Context) -> _Verdict:
@@ -193,14 +236,18 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(_RESIDENT, _judge_resident),
     # 카드번호: Luhn 검사
     _Rule(_CARD, _judge_card),
+    # 운전면허번호: 지역 코드 검사
+    _Rule(_DRIVER_LICENSE, _judge_driver_license),
     # 전화번호: 국번·자릿수 검사
     _Rule(_PHONE, _judge_phone),
+    # 여권번호: 형식만 보고 잡는 경우가 많다. 영문+숫자라 숫자 항목과는 거의 겹치지 않는다
+    _Rule(_PASSPORT, _judge_passport),
     # 가려진 카드번호: Luhn을 볼 수 없다
     _Rule(_MASKED_CARD, _judge_masked_card),
     # 계좌번호: 검증 수단 없이 키워드로만 잡으므로 맨 뒤에 둔다.
-    # 주민번호(6-7), 전화번호(`010-1234-5678`)가 모두 계좌 모양이라 계좌 키워드가 있어도 앞 항목으로
-    # 본다. 휴대폰 번호를 계좌번호로 쓰는 평생계좌여도 가려지는 범위는 같다. 카드번호는 15·16자리라
-    # 계좌(10~14자리)와 길이로 갈린다
+    # 주민번호(6-7), 운전면허번호(2-2-6-2, 구형 2-6-2), 전화번호(`010-1234-5678`)가 모두 계좌 모양이라
+    # 계좌 키워드가 있어도 앞 항목으로 본다. 휴대폰 번호를 계좌번호로 쓰는 평생계좌여도 가려지는
+    # 범위는 같다. 카드번호는 15·16자리라 계좌(10~14자리)와 길이로 갈린다
     _Rule(_ACCOUNT, _judge_account),
 )
 

@@ -9,6 +9,8 @@ from backend.detectors.base import PiiType, TextLine
 from backend.detectors.regex import (
     SCORE_ACCOUNT,
     SCORE_MASKED_CARD,
+    SCORE_PASSPORT,
+    SCORE_PASSPORT_WITH_KEYWORD,
     SCORE_VALIDATED,
     RegexDetector,
 )
@@ -74,6 +76,96 @@ def test_finds_resident_id(text, expected, pii_type):
     ],
 )
 def test_ignores_non_resident_id(text):
+    assert found(text) == []
+
+
+# --- 여권번호 ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("M12345678", "M12345678"),  # 구형
+        ("S12345678", "S12345678"),
+        ("O12345678", "O12345678"),  # 관용 여권
+        ("M123A4567", "M123A4567"),  # 차세대
+        ("PM M123B4567 KOR", "M123B4567"),
+        ("여권번호 G12345678", "G12345678"),
+    ],
+)
+def test_finds_passport(text, expected):
+    assert found(text) == [(expected, PiiType.PASSPORT)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "A12345678",  # 쓰지 않는 영문
+        "M1234567",  # 7자리
+        "M123456789",  # 9자리
+        "XM12345678",  # 앞에 영문이 붙음
+        "M12345678X",  # 뒤에 영문이 붙음
+        "m12345678",  # 소문자
+        "M123AB4567",  # 차세대 형식에서 영문이 두 개
+    ],
+)
+def test_ignores_non_passport(text):
+    assert found(text) == []
+
+
+def test_passport_keyword_raises_score():
+    assert score_of("M12345678") == SCORE_PASSPORT
+    assert score_of("여권번호 M12345678") == SCORE_PASSPORT_WITH_KEYWORD
+    assert score_of("Passport No. M12345678") == SCORE_PASSPORT_WITH_KEYWORD
+    assert score_of("PASSPORT M12345678") == SCORE_PASSPORT_WITH_KEYWORD
+
+
+@pytest.mark.parametrize(
+    ("texts", "expected_score"),
+    [
+        (["여권 PASSPORT", "종류/Type", "M12345678"], SCORE_PASSPORT_WITH_KEYWORD),  # 2줄 위
+        (["M12345678", "성명", "여권"], SCORE_PASSPORT_WITH_KEYWORD),  # 2줄 아래
+        (["여권", "가", "나", "M12345678"], SCORE_PASSPORT),  # 3줄 위는 근처로 보지 않음
+    ],
+)
+def test_passport_keyword_on_nearby_lines(texts, expected_score):
+    [span] = detector.detect(make_lines(texts))
+    assert span.type == PiiType.PASSPORT
+    assert span.score == expected_score
+
+
+# --- 운전면허번호 -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("11-12-345678-90", "11-12-345678-90"),  # 서울
+        ("면허번호 26-99-000001-10", "26-99-000001-10"),  # 울산
+        ("28-20-123456-01", "28-20-123456-01"),  # 경기북부
+        ("13 15 123456 78", "13 15 123456 78"),  # 공백 구분
+        ("서울 12-345678-90", "서울 12-345678-90"),  # 구형 지역명
+        ("경기12-345678-90", "경기12-345678-90"),
+        ("제주 95-123456-12", "제주 95-123456-12"),
+    ],
+)
+def test_finds_driver_license(text, expected):
+    assert found(text) == [(expected, PiiType.DRIVER_LICENSE)]
+    assert score_of(text) == SCORE_VALIDATED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "10-12-345678-90",  # 없는 지역 코드
+        "27-12-345678-90",  # 결번
+        "29-12-345678-90",
+        "111234567890",  # 구분자 없는 12자리 (택배 송장번호와 겹침)
+        "11-12-345678-901",  # 뒤가 숫자로 이어짐
+        "가상 12-345678-90",  # 없는 지역명
+    ],
+)
+def test_ignores_non_driver_license(text):
     assert found(text) == []
 
 
