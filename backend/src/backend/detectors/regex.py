@@ -139,10 +139,13 @@ _PHONE_SEP = r"(?:\s?[-.]\s?|\s)?"
 _PHONE_AREA = rf"(?:\(\s?{_PHONE_PREFIX}\s?\)\s?|{_PHONE_PREFIX}(?:\)\s?|{_PHONE_SEP}))"
 _PHONE = _compile(rf"{_START}{_PHONE_AREA}\d{{3,4}}{_PHONE_SEP}\d{{4}}{_END}")
 
-# 이메일. 줄 재구성이 박스 사이에 넣은 공백을 생각해 `@` 앞뒤 공백 하나는 허용한다
+# 이메일. 줄 재구성이 박스 사이에 넣은 공백을 생각해 `@` 앞뒤와 도메인 `.` 앞뒤 공백 하나는 허용한다.
+# 실제 EasyOCR가 기울어진 `test@example.com`을 `test@example.`과 `com` 두 박스로 나눠 읽었고,
+# 도메인의 `.`을 `:`로 읽기도 했다
+_EMAIL_DOT = r"\s?[.:]\s?"
 _EMAIL = _compile(
     r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9][A-Za-z0-9._%+-]*\s?@\s?"
-    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])"
+    rf"[A-Za-z0-9-]+(?:{_EMAIL_DOT}[A-Za-z0-9-]+)*{_EMAIL_DOT}[A-Za-z]{{2,}}(?![A-Za-z0-9-])"
 )
 
 # 여권번호: 구형 `[MSRODG]` + 8자리, 차세대 `[MSRODG]` + 3자리 + 영문 + 4자리

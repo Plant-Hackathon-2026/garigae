@@ -236,6 +236,9 @@ def test_ignores_non_phone(text):
         ("메일help@example.com으로 보내 주세요", "help@example.com"),
         ("hong.test @example.com", "hong.test @example.com"),  # 박스 사이 공백
         ("01012345678@example.com", "01012345678@example.com"),  # 아이디가 전화번호여도 이메일 하나
+        # 실제 EasyOCR가 기울어진 샘플에서 `.` 뒤로 박스를 나누거나 `.`을 `:`로 읽었다
+        ("이메일: test@example. com", "test@example. com"),
+        ("이메일: test@example: com", "test@example: com"),
     ],
 )
 def test_finds_email(text, expected):
@@ -250,6 +253,7 @@ def test_finds_email(text, expected):
         "help@.com",
         # 실제 EasyOCR가 hong.test@example.com을 이렇게 읽은 적이 있다. 빠진 `.`을 추측해 채우지 않는다
         "hong test@examplecom",
+        "help@example: 확인 바람",  # `:` 뒤에 최상위 도메인이 없음
     ],
 )
 def test_ignores_non_email(text):
